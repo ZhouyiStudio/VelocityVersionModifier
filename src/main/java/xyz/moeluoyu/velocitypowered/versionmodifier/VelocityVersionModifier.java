@@ -21,16 +21,18 @@ import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 @Plugin(
         id = "velocity-version-modifier",
         name = "3d3kVersionModifier",
-        version = "1.5",
+        version = "1.6",
         description = "修改MC客户端遥测中的服务器版本信息",
         authors = {"Zhouyi2013"}
 )
@@ -39,6 +41,7 @@ public class VelocityVersionModifier {
     private final Logger logger;
     private final Path dataDirectory;
     private String customVersion;
+    private boolean overrideModInfo;
     private static final String PERMISSION_NODE = "velocityversionmodifier.admin";
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
@@ -62,10 +65,24 @@ public class VelocityVersionModifier {
         ServerPing ping = event.getPing();
         ServerPing.Builder builder = ping.asBuilder();
 
-        // 只改版本名称，协议号保持原样
+        // 1) 只改版本名称，协议号保持原样
         ServerPing.Version originalVersion = ping.getVersion();
         ServerPing.Version version = new ServerPing.Version(originalVersion.getProtocol(), customVersion);
         builder.version(version);
+
+        // 2) 同步改写 modinfo（F3 里显示的后端服务器版本信息通常来自这里）
+        if (overrideModInfo) {
+            Optional<ServerPing.ModInfo> modInfoOpt = ping.getModinfo();
+            if (modInfoOpt.isPresent()) {
+                ServerPing.ModInfo modInfo = modInfoOpt.get();
+                List<ServerPing.ModInfo.Mod> newMods = new ArrayList<>();
+                for (ServerPing.ModInfo.Mod mod : modInfo.getMods()) {
+                    // 把每个 mod 的 version 都换成 customVersion
+                    newMods.add(new ServerPing.ModInfo.Mod(mod.getId(), customVersion));
+                }
+                builder.modinfo(new ServerPing.ModInfo(modInfo.getType(), newMods));
+            }
+        }
 
         event.setPing(builder.build());
     }
@@ -75,9 +92,11 @@ public class VelocityVersionModifier {
         try (FileReader reader = new FileReader(configFile)) {
             Map<String, Object> config = GSON.fromJson(reader, Map.class);
             customVersion = (String) config.getOrDefault("custom-version", "Custom Velocity");
+            overrideModInfo = (Boolean) config.getOrDefault("override-modinfo", true);
         } catch (IOException e) {
             logger.error("加载配置文件失败", e);
             customVersion = "Custom Velocity";
+            overrideModInfo = true;
         }
     }
 
@@ -101,6 +120,7 @@ public class VelocityVersionModifier {
         try (FileWriter writer = new FileWriter(configFile)) {
             Map<String, Object> defaultConfig = new HashMap<>();
             defaultConfig.put("custom-version", "Custom Velocity");
+            defaultConfig.put("override-modinfo", true);
             GSON.toJson(defaultConfig, writer);
             logger.info("已创建默认配置文件");
         } catch (IOException e) {
@@ -136,12 +156,21 @@ public class VelocityVersionModifier {
                             invocation.source().sendMessage(Component.text("已将版本名称设置为: " + newVersion));
                         }
                         break;
+                    case "modinfo":
+                        if (args.length == 1) {
+                            invocation.source().sendMessage(Component.text("当前 override-modinfo: " + overrideModInfo));
+                        } else {
+                            overrideModInfo = Boolean.parseBoolean(args[1]);
+                            saveConfig();
+                            invocation.source().sendMessage(Component.text("已将 override-modinfo 设置为: " + overrideModInfo));
+                        }
+                        break;
                     case "reload":
                         loadConfig();
                         invocation.source().sendMessage(Component.text("已重新加载配置文件，版本信息已更新。"));
                         break;
                     default:
-                        invocation.source().sendMessage(Component.text("未知子命令，请使用 /3d3kv [version | reload]"));
+                        invocation.source().sendMessage(Component.text("未知子命令，请使用 /3d3kv [version | modinfo | reload]"));
                 }
             }
 
@@ -149,10 +178,10 @@ public class VelocityVersionModifier {
             public List<String> suggest(Invocation invocation) {
                 String[] args = invocation.arguments();
                 if (args.length == 0) {
-                    return Arrays.asList("version", "reload");
+                    return Arrays.asList("version", "modinfo", "reload");
                 } else if (args.length == 1) {
-                    List<String> suggestions = new java.util.ArrayList<>();
-                    for (String subCommand : Arrays.asList("version", "reload")) {
+                    List<String> suggestions = new ArrayList<>();
+                    for (String subCommand : Arrays.asList("version", "modinfo", "reload")) {
                         if (subCommand.startsWith(args[0].toLowerCase())) {
                             suggestions.add(subCommand);
                         }
@@ -161,6 +190,9 @@ public class VelocityVersionModifier {
                 } else if (args.length == 2) {
                     if (args[0].equalsIgnoreCase("version")) {
                         return Collections.singletonList("<版本名称>");
+                    }
+                    if (args[0].equalsIgnoreCase("modinfo")) {
+                        return Arrays.asList("true", "false");
                     }
                 }
                 return Collections.emptyList();
@@ -172,6 +204,8 @@ public class VelocityVersionModifier {
         invocation.source().sendMessage(Component.text("用法:"));
         invocation.source().sendMessage(Component.text("/3d3kv version - 查看当前设置的版本"));
         invocation.source().sendMessage(Component.text("/3d3kv version <版本名称> - 设置新的版本名称"));
+        invocation.source().sendMessage(Component.text("/3d3kv modinfo - 查看是否改写 modinfo"));
+        invocation.source().sendMessage(Component.text("/3d3kv modinfo <true|false> - 设置是否改写 modinfo"));
         invocation.source().sendMessage(Component.text("/3d3kv reload - 重新加载配置文件"));
     }
 
@@ -180,6 +214,7 @@ public class VelocityVersionModifier {
         try (FileWriter writer = new FileWriter(configFile)) {
             Map<String, Object> config = new HashMap<>();
             config.put("custom-version", customVersion);
+            config.put("override-modinfo", overrideModInfo);
             GSON.toJson(config, writer);
             logger.info("已保存配置文件");
         } catch (IOException e) {
